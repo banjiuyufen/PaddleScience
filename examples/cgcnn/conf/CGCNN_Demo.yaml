@@ -1,0 +1,58 @@
+defaults: # 
+  - ppsci_default # 
+  - TRAIN: train_default # 
+  - TRAIN/ema: ema_default # 
+  - TRAIN/swa: swa_default #
+  - EVAL: eval_default # 
+  - _self_ # 
+
+hydra:
+  run:
+    # dynamic output directory according to running time and override name
+    dir: outputs_CGCNN/${now:%Y-%m-%d}/${now:%H-%M-%S}/${hydra.job.override_dirname} # 
+  job:
+    name: ${mode} # name of logfile
+    chdir: false # keep current working directory unchanged
+  callbacks:
+    init_callback: # 
+      _target_: ppsci.utils.callbacks.InitCallback # 
+  sweep:
+    # output directory for multirun
+    dir: ${hydra.run.dir}
+    subdir: ./
+
+# general settings
+mode: train # running mode: train/eval # 
+seed: 42 # 
+output_dir: ${hydra:run.dir} # 
+log_freq: 20 # 
+use_tbd: false # 
+
+TRAIN_DIR: "/home/data_cy/PaddleScience/demo/data/train/" # 
+VALID_DIR: "/home/data_cy/PaddleScience/demo/data/valid/" #
+EVALUATE_DIR : NULL #
+
+# model settings
+MODEL: # 
+  ATOM_FEA_LEN: 64 # 
+  N_CONV: 3 # 
+  H_FEA_LEN: 128 # 
+  N_H: 1 # 
+
+# training settings
+TRAIN: # 
+  epochs: 30 # 
+  eval_during_train: true # 
+  eval_freq: 1 # 
+  batch_size: 64 # 
+  lr: 0.001 # 
+  momentum: 0.9 #
+  weight_decay: 0.01 #
+  pretrained_model_path: null # 
+  checkpoint_path: null # 
+
+# evaluation settings
+EVAL: # 
+  MODEL_PATH: null # 
+  batch_size: 64 # 
+  
