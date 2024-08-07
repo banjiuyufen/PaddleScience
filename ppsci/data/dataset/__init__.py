@@ -43,8 +43,10 @@ from ppsci.data.dataset.trphysx_dataset import CylinderDataset
 from ppsci.data.dataset.trphysx_dataset import LorenzDataset
 from ppsci.data.dataset.trphysx_dataset import RosslerDataset
 from ppsci.data.dataset.vtu_dataset import VtuDataset
+from ppsci.data.dataset.cgcnn_dataset import CIFData as CGCNNDataset
 from ppsci.data.process import transform
 from ppsci.utils import logger
+
 
 if TYPE_CHECKING:
     from paddle import io
@@ -79,6 +81,7 @@ __all__ = [
     "ExtMoEENSODataset",
     "SEVIRDataset",
     "build_dataset",
+    "CGCNNDataset",
 ]
 
 
