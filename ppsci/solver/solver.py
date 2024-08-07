@@ -54,8 +54,6 @@ from ppsci.utils import misc
 from ppsci.utils import save_load
 
 if TYPE_CHECKING:
-    from types import ModuleType
-
     from paddle.static import InputSpec
 
 
@@ -236,7 +234,7 @@ class Solver:
         if self.device != "cpu" and paddle.device.get_device() == "cpu":
             logger.warning(f"Set device({device}) to 'cpu' for only cpu available.")
             self.device = "cpu"
-        self.device = paddle.device.set_device(self.device)
+        self.device = paddle.set_device(self.device)
 
         # set equations for physics-driven or data-physics hybrid driven task, such as PINN
         self.equation = equation
@@ -266,18 +264,6 @@ class Solver:
                         f"{self.compute_metric_by_batch} when compute_metric_by_batch="
                         f"{self.compute_metric_by_batch}."
                     )
-            # check metric name uniqueness over all validators
-            _count = {}
-            for _validator in validator.values():
-                for metric_name in _validator.metric:
-                    if metric_name in _count:
-                        logger.warning(
-                            f"Metric name({metric_name}) is duplicated, please ensure "
-                            "all metric names are unique over all given validators."
-                        )
-                    _count[metric_name] = 1
-            del _count
-
         # whether set `stop_gradient=True` for every Tensor if no differentiation involved during evaluation
         if not cfg:
             self.eval_with_no_grad = eval_with_no_grad
@@ -334,7 +320,6 @@ class Solver:
                 self.scaler,
                 self.equation,
                 self.ema_model,
-                self.loss_aggregator,
             )
             if isinstance(loaded_metric, dict):
                 self.best_metric.update(loaded_metric)
@@ -451,7 +436,7 @@ class Solver:
             if version.Version(paddle.__version__) < version.Version("2.6.0"):
                 logger.warning(
                     f"Detected paddlepaddle version is '{paddle_version}', "
-                    "currently it is recommended to use paddlepaddle >= 2.6 or develop version."
+                    "currently it is recommended to use release 2.6 or develop version."
                 )
         else:
             paddle_version = f"develop({paddle.version.commit[:7]})"
@@ -568,7 +553,6 @@ class Solver:
                         self.output_dir,
                         "best_model",
                         self.equation,
-                        aggregator=self.loss_aggregator,
                     )
                 logger.info(
                     f"[Eval][Epoch {epoch_id}]"
@@ -635,7 +619,6 @@ class Solver:
                     f"epoch_{epoch_id}",
                     self.equation,
                     ema_model=self.ema_model,
-                    aggregator=self.loss_aggregator,
                 )
 
             # save the latest model for convenient resume training
@@ -649,7 +632,6 @@ class Solver:
                 self.equation,
                 print_log=(epoch_id == start_epoch),
                 ema_model=self.ema_model,
-                aggregator=self.loss_aggregator,
             )
 
     def finetune(self, pretrained_model_path: str) -> None:
@@ -714,7 +696,7 @@ class Solver:
         self,
         input_dict: Dict[str, Union[np.ndarray, paddle.Tensor]],
         expr_dict: Optional[Dict[str, Callable]] = None,
-        batch_size: Optional[int] = 64,
+        batch_size: int = 64,
         no_grad: bool = True,
         return_numpy: bool = False,
     ) -> Dict[str, Union[paddle.Tensor, np.ndarray]]:
@@ -724,9 +706,7 @@ class Solver:
             input_dict (Dict[str, Union[np.ndarray, paddle.Tensor]]): Input data in dict.
             expr_dict (Optional[Dict[str, Callable]]): Expression dict, which guide to
                 compute equation variable with callable function. Defaults to None.
-            batch_size (Optional[int]): Predicting by batch size. If None, data in
-                `input_dict` will be used directly for inference without any batch slicing.
-                Defaults to 64.
+            batch_size (int, optional): Predicting by batch size. Defaults to 64.
             no_grad (bool): Whether set stop_gradient=True for entire prediction, mainly
                 for memory-efficiency. Defaults to True.
             return_numpy (bool): Whether convert result from Tensor to numpy ndarray.
@@ -779,32 +759,26 @@ class Solver:
             if self.world_size > 1
             else input_dict
         )
-        local_batch_num = (
-            (local_num_samples_pad + (batch_size - 1)) // batch_size
-            if batch_size is not None
-            else 1
-        )
+        local_batch_num = (local_num_samples_pad + (batch_size - 1)) // batch_size
 
         pred_dict = misc.Prettydefaultdict(list)
         with self.no_grad_context_manager(no_grad), self.no_sync_context_manager(
             self.world_size > 1, self.model
         ):
             for batch_id in range(local_batch_num):
-                # prepare local batch input
-                if batch_size is not None:
-                    st = batch_id * batch_size
-                    ed = min(local_num_samples_pad, (batch_id + 1) * batch_size)
-                    batch_input_dict = {
-                        k: v[st:ed] for k, v in local_input_dict.items()
-                    }
-                else:
-                    batch_input_dict = {**local_input_dict}
-                # Keep dtype unchanged as all dtype be correct when given into predict function
-                for key in batch_input_dict:
-                    if not paddle.is_tensor(batch_input_dict[key]):
+                batch_input_dict = {}
+                st = batch_id * batch_size
+                ed = min(local_num_samples_pad, (batch_id + 1) * batch_size)
+
+                # prepare batch input dict
+                for key in local_input_dict:
+                    if not paddle.is_tensor(local_input_dict[key]):
                         batch_input_dict[key] = paddle.to_tensor(
-                            batch_input_dict[key], stop_gradient=no_grad
+                            local_input_dict[key][st:ed], paddle.get_default_dtype()
                         )
+                    else:
+                        batch_input_dict[key] = local_input_dict[key][st:ed]
+                    batch_input_dict[key].stop_gradient = no_grad
 
                 # forward
                 with self.autocast_context_manager(self.use_amp, self.amp_level):
@@ -812,21 +786,21 @@ class Solver:
                         expr_dict, batch_input_dict, self.model
                     )
 
-                # collect local batch output
+                # collect batch data
                 for key, batch_output in batch_output_dict.items():
                     pred_dict[key].append(
                         batch_output.detach() if no_grad else batch_output
                     )
 
-            # concatenate local output
+            # concatenate local predictions
             pred_dict = {key: paddle.concat(value) for key, value in pred_dict.items()}
 
             if self.world_size > 1:
-                # gather global output from all devices if world_size > 1
+                # gather global predictions from all devices if world_size > 1
                 pred_dict = {
                     key: misc.all_gather(value) for key, value in pred_dict.items()
                 }
-                # rearrange output as the same order of input_dict according
+                # rearrange predictions as the same order of input_dict according
                 # to inverse permutation
                 perm = np.arange(num_samples_pad, dtype="int64")
                 perm = np.concatenate(
@@ -837,7 +811,7 @@ class Solver:
                 perm_inv[perm] = np.arange(num_samples_pad, dtype="int64")
                 perm_inv = paddle.to_tensor(perm_inv)
                 pred_dict = {key: value[perm_inv] for key, value in pred_dict.items()}
-                # then discard output of padding data at the end if num_pad > 0
+                # then discard predictions of padding data at the end if num_pad > 0
                 if num_pad > 0:
                     pred_dict = {
                         key: value[:num_samples] for key, value in pred_dict.items()
@@ -862,9 +836,6 @@ class Solver:
         export_path: str,
         with_onnx: bool = False,
         skip_prune_program: bool = False,
-        *,
-        full_graph: bool = True,
-        ignore_modules: Optional[List[ModuleType]] = None,
     ):
         """
         Convert model to static graph model and export to files.
@@ -877,22 +848,12 @@ class Solver:
                 paddle inference models are exported. Defaults to False.
             skip_prune_program (bool, optional): Whether prune program, pruning program
                 may cause unexpectable result, e.g. llm-inference. Defaults to False.
-            full_graph (bool, optional): Symbolic OpCode Translator(SOT) will be used
-                when set to True, where otherwise use Abstract Syntax Tree(AST) if False.
-                Defaults to True.
-            ignore_modules (List[ModuleType]): Adds modules that should be ignored during
-                conversion. Builtin modules that have been ignored are collections, pdb,
-                copy, inspect, re, numpy, logging, six. For example, einops can be added
-                here. Defaults to None.
         """
-        if ignore_modules is not None:
-            jit.ignore_module(ignore_modules)
-
         jit.enable_to_static(True)
 
         if self.pretrained_model_path is None:
             logger.warning(
-                "'INFER.pretrained_model_path' is not given, so the weights of exported "
+                "'pretrained_model_path' is not given, so the weights of exported "
                 "model will be random initialized."
             )
 
@@ -900,8 +861,7 @@ class Solver:
         static_model = jit.to_static(
             self.model,
             input_spec=input_spec,
-            full_graph=full_graph,
-            ignore_module=ignore_modules,
+            full_graph=True,
         )
 
         # save static graph model to disk
@@ -913,18 +873,11 @@ class Solver:
             raise e
         logger.message(
             f"Inference model has been exported to: {export_path}, including "
-            + (
-                "*.json, *.pdiparams files."
-                if misc.check_flag_enabled("FLAGS_enable_pir_api")
-                else "*.pdmodel, *.pdiparams and *.pdiparams.info files."
-            )
+            "*.pdmodel, *.pdiparams and *.pdiparams.info files."
         )
         jit.enable_to_static(False)
 
         if with_onnx:
-            # TODO: support pir + onnx
-            if misc.check_flag_enabled("FLAGS_enable_pir_api"):
-                raise ValueError("paddle2onnx does not support PIR mode yet.")
             if not importlib.util.find_spec("paddle2onnx"):
                 raise ModuleNotFoundError(
                     "Please install paddle2onnx with `pip install paddle2onnx`"

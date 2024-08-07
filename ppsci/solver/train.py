@@ -53,33 +53,32 @@ def train_epoch_func(solver: "solver.Solver", epoch_id: int, log_freq: int):
         input_dicts = []
         label_dicts = []
         weight_dicts = []
+        
         for _, _constraint in solver.constraint.items():
             # fetch data from data loader
-            if solver.nvtx_flag:  # only for nsight analysis
-                core.nvprof_nvtx_push("Data load")
-
             try:
                 input_dict, label_dict, weight_dict = next(_constraint.data_iter)
             except StopIteration:
                 _constraint.data_iter = iter(_constraint.data_loader)
                 input_dict, label_dict, weight_dict = next(_constraint.data_iter)
-
-            if solver.nvtx_flag:  # only for nsight analysis
-                core.nvprof_nvtx_pop()
-
             reader_cost += time.perf_counter() - reader_tic
-
+            
             for v in input_dict.values():
                 if hasattr(v, "stop_gradient"):
                     v.stop_gradient = False
-
+            # print(input_dict.values()) 
+            # print('\n')
+            # print(len(list(input_dict.values())[0][-1]))     
             # gather each constraint's input, label, weight to a list
             input_dicts.append(input_dict)
             label_dicts.append(label_dict)
             weight_dicts.append(weight_dict)
-            total_batch_size += next(iter(input_dict.values())).shape[0]
+            if isinstance(next(iter(input_dict.values())), list) :
+                total_batch_size += len(list(next(iter(input_dict.values())))[0][-1])
+            else:
+                total_batch_size += next(iter(input_dict.values())).shape[0]
             reader_tic = time.perf_counter()
-
+        
         loss_dict = misc.Prettydefaultdict(float)
         loss_dict["loss"] = 0.0
         # forward for every constraint, including model and equation expression
